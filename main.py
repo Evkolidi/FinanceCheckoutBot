@@ -16,10 +16,6 @@ import messages
 
 nest_asyncio.apply()
 
-class DoubleInitError(Exception):
-    """Raised when object is initilized for the second time when it shouldn't"""
-    pass
-
 class UsersData:
     """Uses async SQLite to storage and manipulate data of users. (Singleton)
 
@@ -56,20 +52,34 @@ class UsersData:
         """Creates new database if it doesn't exists"""
 
         await self._cur.execute("""CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY,
-            balance INTEGER NOT NULL DEFAULT 0
+            user_id INTEGER PRIMARY KEY
+            )""")
+
+        await self._cur.execute("""CREATE TABLE IF NOT EXISTS categories (
+            category_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id INTEGER NOT NULL,
+            name TEXT NOT NULL
+            )""")
+
+        await self._cur.execute("""CREATE TABLE IF NOT EXISTS accounts (
+            account_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner_id INTEGER NOT NULL,
+            name TEXT NOT NULL
             )""")
 
         await self._cur.execute("""CREATE TABLE IF NOT EXISTS transactions (
             transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER NOT NULL,
-            amount INTEGER NOT NULL DEFAULT 0
+            category_id INTEGER NOT NULL,
+            account_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL
             )""")
 
     async def delete(self):
         """Deletes database if it exists"""
 
         await self._cur.execute("""DROP TABLE IF EXISTS users""")
+        await self._cur.execute("""DROP TABLE IF EXISTS accounts""")
+        await self._cur.execute("""DROP TABLE IF EXISTS categories""")
         await self._cur.execute("""DROP TABLE IF EXISTS transactions""")
 
     async def add_user(self, user_id):
@@ -78,9 +88,10 @@ class UsersData:
         """
 
         try:
-            await self._cur.execute(f"""INSERT INTO users (user_id) VALUES ({user_id})""")
-        except Exception as e:
-            raise DoubleInitError
+            await self._cur.execute("""INSERT INTO users (user_id) VALUES (?)""", (user_id,))
+            return True
+        except Exception:
+            return False
 
     async def set_value(self, user_id, name, new_value):
         """Changes value of 'name' of user 'user_id' to 'new_value'
@@ -88,8 +99,9 @@ class UsersData:
         """
 
         try:
-            await self._cur.execute(f"""INSERT INTO users (user_id, {name}) 
-                VALUES ({user_id}, {new_value})""")
+            await self._cur.execute("""INSERT INTO users (user_id, ?) 
+                VALUES (?, ?)""",
+                (name, user_id, new_value))
         except Exception:
             await self._cur.execute(f"""UPDATE users SET {name} = {new_value} 
                 WHERE user_id = {user_id}""")
@@ -120,14 +132,82 @@ class UsersData:
             raise KeyError
         return result[0]
 
-    async def exists(self, name, value):
-        """Returns user_id of user with 'name' = 'value', 0 otherwise"""
+    async def exists_user(self, user_id):
+        await self._cur.execute("""SELECT * FROM users WHERE user_id = ?""", (user_id,))
 
-        try:
-            result = await self.get_value(name, value, "user_id")
-            return result
-        except KeyError:
-            return 0
+        result = await self._cur.fetchone()
+        if result is None:
+            return False
+        return True
+
+    async def get_category_id(self, user_id, category_name):
+        await self._cur.execute("""SELECT category_id FROM categories
+                WHERE (owner_id, name) = (?, ?)""",
+                (user_id, category_name))
+
+        result = await self._cur.fetchone()
+        if result is None:
+            return -1
+        return result[0]
+
+    async def get_account_id(self, user_id, account_name):
+        await self._cur.execute("""SELECT account_id FROM accounts
+                WHERE (owner_id, name) = (?, ?)""",
+                (user_id, account_name))
+
+        result = await self._cur.fetchone()
+        if result is None:
+            return -1
+        return result[0]
+
+    async def exists_category(self, user_id, category_name):
+        result = await self.get_category_id(user_id, category_name)
+        return result != -1
+
+    async def exists_account(self, user_id, account_name):
+        result = await self.get_account_id(user_id, account_name)
+        return result != -1
+
+    async def get_balance(self, user_id, account_name=""):
+        if account_name:
+            await self._cur.execute("""SELECT count(amount), sum(amount) FROM transactions
+                    JOIN accounts ON transactions.account_id = accounts.account_id
+                    WHERE (accounts.owner_id, accounts.name) = (?, ?)""",
+                    (user_id, account_name))
+        else:
+            await self._cur.execute("""SELECT count(amount), sum(amount) FROM transactions
+                    JOIN accounts ON transactions.account_id = accounts.account_id
+                    WHERE accounts.owner_id = ?""",
+                    (user_id,))
+
+        result = await self._cur.fetchone()
+        return result[1] if result[0] else 0
+
+    async def add_category(self, user_id, name):
+        exists = await self.exists_category(user_id, name)
+        if exists:
+            return False
+
+        await self._cur.execute("""INSERT INTO categories (owner_id, name) 
+                VALUES (?, ?)""",
+                (user_id, name))
+        return True
+
+    async def add_account(self, user_id, name):
+        exists = await self.exists_account(user_id, name)
+        if exists:
+            return False
+
+        await self._cur.execute("""INSERT INTO accounts (owner_id, name) 
+                VALUES (?, ?)""",
+                (user_id, name))
+        return True
+
+    async def add_transaction(self, user_id, amount, category_id, account_id):
+        await self._cur.execute("""INSERT INTO transactions 
+                (category_id, account_id, amount)
+                VALUES (?, ?, ?)""",
+                (category_id, account_id, amount))
 
 
 
@@ -137,13 +217,6 @@ def isfloat(number):
         return True
     except ValueError:
         return False
-
-def add_transaction_check(tokens):
-    return len(tokens) == 2 and tokens[0] == "добавить" and isfloat(tokens[1])
-
-def get_balance_check(tokens):
-    return len(tokens) == 1 and tokens[0] == "баланс"
-
 
 
 async def main():
@@ -156,29 +229,32 @@ async def main():
             await data.init(con)
 
 
-            @dp.message_handler(commands=['start'])
+            @dp.message_handler(commands=["start"])
             async def start_message(message: types.Message):
                 await message.reply(messages.START)
 
             @dp.message_handler(commands=["get_id"])
             async def get_id_message(message: types.Message):
                 user_id = message.from_user.id
-                await message.reply(messages.GET_ID.format(user_id=user_id))
+
+                await message.reply(messages.GET_ID.format(user_id=user_id), 
+                        parse_mode=types.ParseMode.HTML)
 
 
             @dp.message_handler(commands=["register"])
             async def registration_message(message: types.Message):
                 user_id = message.from_user.id
 
-                try: 
-                    await data.add_user(user_id)
-                    await bot.send_message(message.from_user.id, 
-                            messages.SUCCESSFUL_REGISTRATION)
-                except DoubleInitError:
-                    await bot.send_message(message.from_user.id, 
-                            messages.DOUBLE_REGISTRATION)
+                result = await data.add_user(user_id)
 
-                await con.commit()
+                if result:
+                    tg.create_task(bot.send_message(message.from_user.id,
+                            messages.SUCCESSFUL_REGISTRATION))
+                else:
+                    tg.create_task(bot.send_message(message.from_user.id,
+                            messages.DOUBLE_REGISTRATION))
+
+                tg.create_task(con.commit())
 
             @dp.message_handler(commands=["recreate"])
             async def recreate_message(message: types.Message):
@@ -200,29 +276,90 @@ async def main():
                 ]
                 keyboard = ReplyKeyboardMarkup(keyboard=kb)
 
-                await message.reply(messages.HELP, reply_markup=keyboard)
+                await message.reply(messages.HELP, reply_markup=keyboard,
+                        parse_mode=types.ParseMode.HTML)
 
             @dp.message_handler()
             async def message_reply(message: types.Message):
                 user_id = message.from_user.id
-                result = await data.exists("user_id", user_id)
+                result = await data.exists_user(user_id)
                 if not result:
                     await message.reply(messages.REGISTER_REQUIRED)
                     return
 
                 tokens = [word.lower() for word in message.text.split()]
 
-                if add_transaction_check(tokens):
-                    await data.add_value(message.from_user.id, "balance", 
-                            round(float(tokens[1]), 2))
-                    tg.create_task(message.reply(messages.TRANSACTION_ADDED))
-                elif get_balance_check(tokens):
-                    balance = await data.get_value("user_id", user_id, "balance")
-                    tg.create_task(message.reply(
-                            messages.CURRENT_BALANCE.format(balance=balance))
-                    )
-                else:
-                    tg.create_task(message.reply(messages.UNKNOWN_COMMAND))
+                match tokens:
+                    case "добавить"|"доб", "категорию"|"кат", name:
+                        result = await data.add_category(user_id, name)
+                        if not result:
+                            tg.create_task(message.reply(
+                                    messages.DOUBLE_CATEGORY_ADD.format(name=name),
+                                    parse_mode=types.ParseMode.HTML))
+                        else:
+                            tg.create_task(message.reply(
+                                    messages.SUCCESSFUL_CATEGORY_ADD.format(name=name),
+                                    parse_mode=types.ParseMode.HTML))
+
+                    case "добавить"|"доб", "счет"|"счёт", name:
+                        result = await data.add_account(user_id, name)
+                        if not result:
+                            tg.create_task(message.reply(
+                                    messages.DOUBLE_ACCOUNT_ADD.format(name=name),
+                                    parse_mode=types.ParseMode.HTML))
+                        else:
+                            tg.create_task(message.reply(
+                                    messages.SUCCESSFUL_ACCOUNT_ADD.format(name=name),
+                                    parse_mode=types.ParseMode.HTML))
+
+                    case amount, category, account if isfloat(amount.replace(',', '.')):
+                        category_id = await data.get_category_id(user_id, category)
+                        account_id = await data.get_account_id(user_id, account)
+
+                        match category_id, account_id:
+                            case -1, -1:
+                                tg.create_task(message.reply(
+                                        messages.CATEGORY_AND_ACCOUNT_NOT_EXIST.format(
+                                        category=category, account=account),
+                                        parse_mode=types.ParseMode.HTML))
+                            case -1, _:
+                                tg.create_task(message.reply(
+                                        messages.CATEGORY_NOT_EXIST.format(name=category),
+                                        parse_mode=types.ParseMode.HTML))
+                            case _, -1:
+                                tg.create_task(message.reply(
+                                        messages.ACCOUNT_NOT_EXIST.format(name=account),
+                                        parse_mode=types.ParseMode.HTML))
+                            case _, _:
+                                await data.add_transaction(user_id, 
+                                        float(amount.replace(',', '.')), category_id, account_id)
+                                tg.create_task(message.reply(
+                                        messages.TRANSACTION_ADD.format(amount=amount, 
+                                            category=category, account=account),
+                                        parse_mode=types.ParseMode.HTML))
+
+                    case "баланс"|"бал", account:
+                        exists = await data.exists_account(user_id, account)
+                        if not exists:
+                            tg.create_task(message.reply(
+                                    messages.ACCOUNT_NOT_EXIST.format(name=account),
+                                    parse_mode=types.ParseMode.HTML))
+                        else:
+                            balance = await data.get_balance(user_id, account)
+                            tg.create_task(message.reply(
+                                    messages.ACCOUNT_BALANCE.format(balance=round(balance, 2),
+                                        account=account), 
+                                    parse_mode=types.ParseMode.HTML))
+
+                    case "баланс"|"бал",:
+                        balance = await data.get_balance(user_id)
+                        tg.create_task(message.reply(
+                                messages.BALANCE.format(balance=round(balance, 2)),
+                                parse_mode=types.ParseMode.HTML))
+
+                    case _:
+                        tg.create_task(message.reply(messages.UNKNOWN_COMMAND))
+
                 tg.create_task(con.commit())
 
 
