@@ -7,6 +7,8 @@ from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.types import KeyboardButton
 
+from datetime import datetime
+
 import aiosqlite as sq
 import asyncio
 import nest_asyncio
@@ -45,7 +47,8 @@ class UsersData:
             transaction_id INTEGER PRIMARY KEY AUTOINCREMENT,
             category_id INTEGER NOT NULL,
             account_id INTEGER NOT NULL,
-            amount INTEGER NOT NULL
+            amount INTEGER NOT NULL,
+            day DATE NOT NULL
             )""")
 
     async def delete(self):
@@ -114,9 +117,9 @@ class UsersData:
 
     async def add_transaction(self, user_id, amount, category_id, account_id):
         await self._cur.execute("""INSERT INTO transactions 
-                (category_id, account_id, amount)
-                VALUES (?, ?, ?)""",
-                (category_id, account_id, amount))
+                (category_id, account_id, amount, day)
+                VALUES (?, ?, ?, ?)""",
+                (category_id, account_id, amount, datetime.today().strftime('%Y-%m-%d')))
 
     async def delete_category(self, user_id, category_id):
         await self._cur.execute("""DELETE FROM transactions
@@ -158,6 +161,20 @@ class UsersData:
             accounts.append(row[0])
         return accounts
 
+    async def get_transactions(self, user_id, begin, end, category_id=-1):
+        if category_id == -1:
+            await self._cur.execute("""SELECT sum(amount) FROM transactions
+                    JOIN accounts ON transactions.account_id = accounts.account_id
+                    WHERE owner_id = ? AND day BETWEEN ? AND ?""",
+                    (user_id, begin, end))
+        else:
+            await self._cur.execute("""SELECT sum(amount) FROM transactions
+                    JOIN accounts ON transactions.account_id = accounts.account_id
+                    WHERE (owner_id, category_id) = (?, ?) AND day BETWEEN ? AND ?""",
+                    (user_id, category_id, begin, end))
+
+        result = await self._cur.fetchone()
+        return 0 if result is None or result[0] is None else result[0]
 
 
 
@@ -169,6 +186,12 @@ def isfloat(number):
     except ValueError:
         return False
 
+def is_date_correct(date):
+    try:
+        datetime.strptime(date, "%Y-%m-%d") 
+    except ValueError:
+        return False
+    return True
 
 async def main():
     bot = Bot(token=config.TOKEN)
@@ -313,6 +336,50 @@ async def main():
                         tg.create_task(message.reply(
                                 messages.BALANCE.format(balance=round(balance, 2)),
                                 parse_mode=types.ParseMode.HTML))
+
+                    case "статистика"|"стата", begin, end, category:
+                        category_id = await data.get_category_id(user_id, category)
+
+                        if category_id == -1:
+                            tg.create_task(message.reply(
+                                    messages.CATEGORY_NOT_EXIST.format(name=category),
+                                    parse_mode=types.ParseMode.HTML))
+                        elif not is_date_correct(begin):
+                            tg.create_task(message.reply(
+                                    messages.DATE_INCORRECT.format(date=begin),
+                                    parse_mode=types.ParseMode.HTML))
+                        elif not is_date_correct(end):
+                            tg.create_task(message.reply(
+                                    messages.DATE_INCORRECT.format(date=end),
+                                    parse_mode=types.ParseMode.HTML))
+                        elif begin > end:
+                            tg.create_task(message.reply(messages.DATE_ORDER_INCORRECT,
+                                    parse_mode=types.ParseMode.HTML))
+                        else:
+                            result = await data.get_transactions(user_id, begin, end, category_id)
+                            tg.create_task(message.reply(
+                                    messages.TIME_STATISTICS_CATEGORY.format(begin=begin,
+                                        end=end, amount=result, category=category),
+                                    parse_mode=types.ParseMode.HTML))
+
+                    case "статистика"|"стата", begin, end:
+                        if not is_date_correct(begin):
+                            tg.create_task(message.reply(
+                                    messages.DATE_INCORRECT.format(date=begin),
+                                    parse_mode=types.ParseMode.HTML))
+                        elif not is_date_correct(end):
+                            tg.create_task(message.reply(
+                                    messages.DATE_INCORRECT.format(date=end),
+                                    parse_mode=types.ParseMode.HTML))
+                        elif begin > end:
+                            tg.create_task(message.reply(messages.DATE_ORDER_INCORRECT,
+                                    parse_mode=types.ParseMode.HTML))
+                        else:
+                            result = await data.get_transactions(user_id, begin, end)
+                            tg.create_task(message.reply(
+                                    messages.TIME_STATISTICS.format(begin=begin,
+                                        end=end, amount=result),
+                                    parse_mode=types.ParseMode.HTML))
 
                     case "категории",:
                         categories = await data.get_categories(user_id)
