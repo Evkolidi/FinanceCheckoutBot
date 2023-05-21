@@ -1,2 +1,2 @@
-# FinanceCheckoutBot
-Bot in telegram with which you can monitor your finances
+Для запуска проекта необходим python3.11, нужно просто запустить файл run.sh
+
