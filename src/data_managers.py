@@ -42,8 +42,8 @@ class UsersData:
         await self._cur.execute("""DROP TABLE IF EXISTS categories""")
         await self._cur.execute("""DROP TABLE IF EXISTS transactions""")
 
-    async def get_balance(self, user_id, account_name=""):
-        if account_name:
+    async def get_balance(self, user_id, account_name=None):
+        if account_name is not None:
             await self._cur.execute("""SELECT count(amount), sum(amount) FROM transactions
                     JOIN accounts ON transactions.account_id = accounts.account_id
                     WHERE (accounts.owner_id, accounts.name) = (?, ?)""",
@@ -146,17 +146,17 @@ class UsersData:
             accounts.append(row[0])
         return accounts
 
-    async def get_transactions_by_time(self, user_id, begin, end, category_id=-1):
-        if category_id == -1:
-            await self._cur.execute("""SELECT sum(amount) FROM transactions
+    async def get_transactions_by_time(self, user_id, begin, end, category_id=None):
+        if category_id is None:
+            await self._cur.execute("""SELECT amount, day FROM transactions
                     JOIN accounts ON transactions.account_id = accounts.account_id
                     WHERE owner_id = ? AND day BETWEEN ? AND ?""",
                     (user_id, begin, end))
         else:
-            await self._cur.execute("""SELECT sum(amount) FROM transactions
+            await self._cur.execute("""SELECT amount, day FROM transactions
                     JOIN accounts ON transactions.account_id = accounts.account_id
                     WHERE (owner_id, category_id) = (?, ?) AND day BETWEEN ? AND ?""",
                     (user_id, category_id, begin, end))
 
-        result = await self._cur.fetchone()
-        return 0 if result is None or result[0] is None else result[0]
+        result = await self._cur.fetchall()
+        return [] if result is None else [list(row) for row in result];

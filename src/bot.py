@@ -1,3 +1,7 @@
+from datetime import datetime
+import time
+import random
+
 from aiogram import Bot, types
 from aiogram.dispatcher import Dispatcher
 from aiogram.utils import executor
@@ -6,8 +10,8 @@ from aiogram.types import InlineKeyboardButton
 from aiogram.types import ReplyKeyboardMarkup
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.types import KeyboardButton
-
-from datetime import datetime
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 import src.config as config
 import src.messages as messages
@@ -25,6 +29,34 @@ def is_date_correct(date):
     except ValueError:
         return False
     return True
+
+def compress_transactions(transactions):
+    if not transactions:
+        return transactions
+    compressed_transactions = [transactions[0]]
+    for i in range(1, len(transactions)):
+        if transactions[i][1] == compressed_transactions[-1][1]:
+            compressed_transactions[-1][0] += transactions[i][0]
+        else:
+            compressed_transactions.append(transactions[i])
+    return compressed_transactions
+
+
+def make_plot(transactions, category_name=None):
+    transactions = compress_transactions(transactions)
+    dates = [data[1] for data in transactions]
+    amounts = [data[0] for data in transactions]
+    ax = sns.stripplot(x=dates, y=amounts);
+    ax = sns.lineplot(x=dates, y=amounts)
+    ax.set(xlabel = "День", ylabel = "Сумма")
+    plt.title("Статистика по всем категориям" if category_name is None else 
+            f"Статистика по категории {category_name}")
+    figure = plt.gcf()
+    file_name = str(time.time() * random.randint(1, 100)).replace('.', '')
+    file_path = f"{file_name}.png"
+    figure.savefig(f"{file_name}.png", dpi=300)
+    plt.clf()
+    return file_path
 
 
 class MessageHandler:
@@ -120,34 +152,33 @@ class MessageHandler:
                             category=category, account=account),
                         parse_mode=types.ParseMode.HTML))
 
-    async def get_account_balance_message(self, message, account):
+    async def get_balance_message(self, message, account=None):
         user_id = message.from_user.id
-        exists = await self._data.exists_account(user_id, account)
+        if account is not None:
+            exists = await self._data.exists_account(user_id, account)
 
-        if not exists:
+        if account is not None and not exists:
             self._tg.create_task(message.reply(
                     messages.ACCOUNT_NOT_EXIST.format(name=account),
                     parse_mode=types.ParseMode.HTML))
         else:
             balance = await self._data.get_balance(user_id, account)
-            self._tg.create_task(message.reply(
-                    messages.ACCOUNT_BALANCE.format(balance=round(balance, 2),
-                        account=account), 
-                    parse_mode=types.ParseMode.HTML))
+            if account is not None:
+                self._tg.create_task(message.reply(
+                        messages.ACCOUNT_BALANCE.format(balance=round(balance, 2),
+                            account=account), 
+                        parse_mode=types.ParseMode.HTML))
+            else:
+                self._tg.create_task(message.reply(
+                        messages.BALANCE.format(balance=round(balance, 2)),
+                        parse_mode=types.ParseMode.HTML))
 
-    async def get_balance_message(self, message):
+    async def get_statistics_message(self, message, begin, end, category=None):
         user_id = message.from_user.id
-        balance = await self._data.get_balance(user_id)
+        if category is not None:
+            category_id = await self._data.get_category_id(user_id, category)
 
-        self._tg.create_task(message.reply(
-                messages.BALANCE.format(balance=round(balance, 2)),
-                parse_mode=types.ParseMode.HTML))
-
-    async def get_category_statistics_message(self, message, begin, end, category):
-        user_id = message.from_user.id
-        category_id = await self._data.get_category_id(user_id, category)
-
-        if category_id == -1:
+        if category is not None and category_id == -1:
             self._tg.create_task(message.reply(
                     messages.CATEGORY_NOT_EXIST.format(name=category),
                     parse_mode=types.ParseMode.HTML))
@@ -163,32 +194,20 @@ class MessageHandler:
             self._tg.create_task(message.reply(messages.DATE_ORDER_INCORRECT,
                     parse_mode=types.ParseMode.HTML))
         else:
-            result = await self._data.get_transactions_by_time(user_id, begin, 
-                    end, category_id)
-            self._tg.create_task(message.reply(
-                    messages.TIME_STATISTICS_CATEGORY.format(begin=begin,
-                        end=end, amount=result, category=category),
-                    parse_mode=types.ParseMode.HTML))
+            result = await self._data.get_transactions_by_time(user_id, begin, end, category)
+            amount = round(sum(data[0] for data in result), 2)
+            file_name = make_plot(result, category)
+            photo = open(file_name, "rb")
 
-    async def get_statistics_message(self, message, begin, end):
-        user_id = message.from_user.id
-
-        if not is_date_correct(begin):
-            self._tg.create_task(message.reply(
-                    messages.DATE_INCORRECT.format(date=begin),
-                    parse_mode=types.ParseMode.HTML))
-        elif not is_date_correct(end):
-            self._tg.create_task(message.reply(
-                    messages.DATE_INCORRECT.format(date=end),
-                    parse_mode=types.ParseMode.HTML))
-        elif begin > end:
-            self._tg.create_task(message.reply(messages.DATE_ORDER_INCORRECT,
-                    parse_mode=types.ParseMode.HTML))
-        else:
-            result = await self._data.get_transactions_by_time(user_id, begin, end)
-            self._tg.create_task(message.reply(
+            if category is not None:
+                self._tg.create_task(message.answer_photo(photo, caption=
+                        messages.TIME_STATISTICS_CATEGORY.format(begin=begin,
+                            end=end, amount=amount, category=category),
+                        parse_mode=types.ParseMode.HTML))
+            else:
+                self._tg.create_task(message.answer_photo(photo, caption=
                     messages.TIME_STATISTICS.format(begin=begin,
-                        end=end, amount=result),
+                        end=end, amount=amount),
                     parse_mode=types.ParseMode.HTML))
 
     async def get_categories_message(self, message):
@@ -268,13 +287,13 @@ class MessageHandler:
                 await self.add_transaction_message(message, amount, category, account)
 
             case "баланс"|"бал", account:
-                await self.get_account_balance_message(message, account)
+                await self.get_balance_message(message, account)
 
             case "баланс"|"бал",:
                 await self.get_balance_message(message)
 
             case "статистика"|"стата", begin, end, category:
-                await self.get_category_statistics_message(message, begin, end, category)
+                await self.get_statistics_message(message, begin, end, category)
 
             case "статистика"|"стата", begin, end:
                 await self.get_statistics_message(message, begin, end)
