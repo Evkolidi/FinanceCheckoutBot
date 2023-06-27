@@ -1,4 +1,5 @@
 from datetime import datetime
+import requests
 import time
 import random
 
@@ -42,21 +43,35 @@ def compress_transactions(transactions):
     return compressed_transactions
 
 
-def make_plot(transactions, category_name=None):
+def make_plot(transactions, category_name=None, currency="RUB", currency_coefficient=1):
     transactions = compress_transactions(transactions)
     dates = [data[1] for data in transactions]
-    amounts = [data[0] for data in transactions]
+    amounts = [data[0] / currency_coefficient for data in transactions]
     ax = sns.stripplot(x=dates, y=amounts);
     ax = sns.lineplot(x=dates, y=amounts)
     ax.set(xlabel = "День", ylabel = "Сумма")
-    plt.title("Статистика по всем категориям" if category_name is None else 
-            f"Статистика по категории {category_name}")
+    plt.title(f"Статистика по всем категориям в {currency}" if category_name is None else 
+            f"Статистика по категории {category_name} в {currency}")
     figure = plt.gcf()
     file_name = str(time.time() * random.randint(1, 100)).replace('.', '')
     file_path = f"{file_name}.png"
     figure.savefig(f"{file_name}.png", dpi=300)
     plt.clf()
     return file_path
+
+def currency_converter():
+    last_used_time = 0
+    data = None
+    def converter_helper(currency):
+        if time.time() - last_used_time > 10:
+            data = requests.get("https://www.cbr-xml-daily.ru/daily_json.js").json()
+            data['Valute']["RUB"]['Value'] = 1
+
+        return data['Valute'][currency]['Value']
+
+    return converter_helper
+
+get_currency = currency_converter()
 
 
 class MessageHandler:
@@ -152,7 +167,7 @@ class MessageHandler:
                             category=category, account=account),
                         parse_mode=types.ParseMode.HTML))
 
-    async def get_balance_message(self, message, account=None):
+    async def get_balance_message(self, message, account=None, currency=None):
         user_id = message.from_user.id
         if account is not None:
             exists = await self._data.exists_account(user_id, account)
@@ -163,17 +178,28 @@ class MessageHandler:
                     parse_mode=types.ParseMode.HTML))
         else:
             balance = await self._data.get_balance(user_id, account)
+            if currency is not None:
+                try:
+                    balance /= get_currency(currency)
+                except Exception:
+                    self._tg.create_task(message.reply(
+                        messages.CURRENCY_CONVERSION_ERROR.format(currency=currency), 
+                        parse_mode=types.ParseMode.HTML))
+                    return
+            else:
+                currency = "RUB"
             if account is not None:
                 self._tg.create_task(message.reply(
                         messages.ACCOUNT_BALANCE.format(balance=round(balance, 2),
-                            account=account), 
+                            account=account, currency=currency), 
                         parse_mode=types.ParseMode.HTML))
             else:
                 self._tg.create_task(message.reply(
-                        messages.BALANCE.format(balance=round(balance, 2)),
+                        messages.BALANCE.format(balance=round(balance, 2),
+                            currency=currency),
                         parse_mode=types.ParseMode.HTML))
 
-    async def get_statistics_message(self, message, begin, end, category=None):
+    async def get_statistics_message(self, message, begin, end, category=None, currency=None):
         user_id = message.from_user.id
         if category is not None:
             category_id = await self._data.get_category_id(user_id, category)
@@ -195,19 +221,31 @@ class MessageHandler:
                     parse_mode=types.ParseMode.HTML))
         else:
             result = await self._data.get_transactions_by_time(user_id, begin, end, category)
-            amount = round(sum(data[0] for data in result), 2)
-            file_name = make_plot(result, category)
+            if currency is not None:
+                try:
+                    currency_coefficient = get_currency(currency)
+                except Exception:
+                    self._tg.create_task(message.reply(
+                        messages.CURRENCY_CONVERSION_ERROR.format(currency=currency), 
+                        parse_mode=types.ParseMode.HTML))
+                    return
+            else:
+                currency_coefficient = 1
+                currency = "RUB"
+
+            amount = round(sum(data[0] for data in result) / currency_coefficient, 2)
+            file_name = make_plot(result, category, currency, currency_coefficient)
             photo = open(file_name, "rb")
 
             if category is not None:
                 self._tg.create_task(message.answer_photo(photo, caption=
                         messages.TIME_STATISTICS_CATEGORY.format(begin=begin,
-                            end=end, amount=amount, category=category),
+                            end=end, amount=amount, category=category, currency=currency),
                         parse_mode=types.ParseMode.HTML))
             else:
                 self._tg.create_task(message.answer_photo(photo, caption=
                     messages.TIME_STATISTICS.format(begin=begin,
-                        end=end, amount=amount),
+                        end=end, amount=amount, currency=currency),
                     parse_mode=types.ParseMode.HTML))
 
     async def get_categories_message(self, message):
@@ -286,11 +324,17 @@ class MessageHandler:
             case amount, category, account if isfloat(amount.replace(',', '.')):
                 await self.add_transaction_message(message, amount, category, account)
 
+            case "баланс"|"бал", account, currency:
+                await self.get_balance_message(message, account, currency.upper())
+
             case "баланс"|"бал", account:
                 await self.get_balance_message(message, account)
 
             case "баланс"|"бал",:
                 await self.get_balance_message(message)
+
+            case "статистика"|"стата", begin, end, category, currency:
+                await self.get_statistics_message(message, begin, end, category, currency.upper())
 
             case "статистика"|"стата", begin, end, category:
                 await self.get_statistics_message(message, begin, end, category)
